@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OpenWrt 流量监控</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: 'Courier New', monospace;
+            margin: 0;
+            padding: 20px;
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card {
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        }
+        .header {
+            color: #4fc3f7;
+            margin: 0 0 10px 0;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #37474f;
+            font-size: 1.1em;
+        }
+        .header::before {
+            content: "★ ";
+        }
+        .chart-container {
+            height: 250px;
+        }
+        .flow-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .flow-table th {
+            background-color: #263238;
+            padding: 8px 10px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+        }
+        .flow-table td {
+            padding: 6px 10px;
+            border-bottom: 1px solid #37474f;
+        }
+        .rx { color: #69f0ae; }
+        .tx { color: #ff5252; }
+        .ipv6 { font-family: 'Consolas', monospace; font-size: 0.85em; }
+        .highlight { animation: fadeHighlight 1.5s; }
+        @keyframes fadeHighlight {
+            0% { background-color: rgba(79, 195, 247, 0.3); }
+            100% { background-color: transparent; }
+        }
+        .info-panel {
+            grid-column: span 2;
+            display: flex;
+            gap: 20px;
+        }
+        .info-box {
+            flex: 1;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            grid-column: span 2;
+        }
+        .stat-item {
+            background-color: #263238;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- 信息面板 -->
+        <div class="info-panel">
+            <div class="card info-box">
+                <div class="header">网络接口</div>
+                <div id="interface">eth0</div>
+                <div>本机IP: <span id="local_ip">192.168.1.1</span></div>
+            </div>
+            <div class="card info-box">
+                <div class="header">实时峰值</div>
+                <div id="global_peak">0 bytes/包</div>
+            </div>
+        </div>
+
+        <!-- 统计信息 -->
+        <div class="card stats-grid">
+            <div class="stat-item">
+                <div class="rx">总接收流量: <span id="total_rx">0</span> bytes</div>
+            </div>
+            <div class="stat-item">
+                <div class="tx">总发送流量: <span id="total_tx">0</span> bytes</div>
+            </div>
+            <div class="stat-item">
+                <div>最近2秒: <span id="period0">0</span> KB/s</div>
+            </div>
+            <div class="stat-item">
+                <div>最近10秒: <span id="period1">0</span> KB/s</div>
+            </div>
+            <div class="stat-item">
+                <div>最近40秒: <span id="period2">0</span> KB/s</div>
+            </div>
+        </div>
+
+        <!-- 饼状图 -->
+        <div class="card">
+            <div class="header">IP流量占比</div>
+            <div class="chart-container">
+                <canvas id="pieChart"></canvas>
+            </div>
+        </div>
+
+        <!-- 柱状图 -->
+        <div class="card">
+            <div class="header">流量趋势</div>
+            <div class="chart-container">
+                <canvas id="barChart"></canvas>
+            </div>
+        </div>
+
+        <!-- 流量明细 -->
+        <div class="card" style="grid-column: span 2;">
+            <div class="header">实时流量明细 (Top 10)</div>
+            <div style="max-height: 300px; overflow-y: auto;">
+                <table class="flow-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>方向</th>
+                            <th>源IP</th>
+                            <th>目的IP</th>
+                            <th>流量(bytes)</th>
+                            <th>包数</th>
+                            <th>峰值</th>
+                        </tr>
+                    </thead>
+                    <tbody id="flowBody">
+                        <!-- 数据由JavaScript动态生成 -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 初始化图表
+        const pieCtx = document.getElementById('pieChart').getContext('2d');
+        const pieChart = new Chart(pieCtx, {
+            type: 'pie',
+            data: { labels: [], datasets: [] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { 
+                        position: 'right',
+                        labels: { 
+                            color: '#fff',
+                            font: { family: "'Courier New', monospace" }
+                        }
+                    }
+                }
+            }
+        });
+
+        const barCtx = document.getElementById('barChart').getContext('2d');
+        const barChart = new Chart(barCtx, {
+            type: 'bar',
+            data: { labels: [], datasets: [] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { 
+                        grid: { color: 'rgba(255,255,255,0.1)' },
+                        ticks: { color: '#bbb' }
+                    },
+                    y: { 
+                        grid: { color: 'rgba(255,255,255,0.1)' },
+                        ticks: { color: '#bbb' },
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+
+        // 状态管理
+        let state = {
+            ipTotals: [],
+            history: Array.from({length: 10}, (_, i) => ({
+                time: `${9-i}s前`,
+                rx: 0,
+                tx: 0
+            }))
+        };
+
+        async function fetchStats() {
+            try {
+                const response = await fetch('/stats.json');
+                const data = await response.json();
+                
+                // 更新全局信息
+                document.getElementById('interface').textContent = data.interface;
+                document.getElementById('local_ip').textContent = data.local_ip;
+                document.getElementById('total_rx').textContent = data.total_rx_bytes.toLocaleString();
+                document.getElementById('total_tx').textContent = data.total_tx_bytes.toLocaleString();
+                document.getElementById('global_peak').textContent = data.global_peak.toLocaleString() + ' bytes/包';
+                
+                // 更新时间段统计
+                const periods = data.period_kbps;
+                document.getElementById('period0').textContent = periods[0].toFixed(2);
+                document.getElementById('period1').textContent = periods[1].toFixed(2);
+                document.getElementById('period2').textContent = periods[2].toFixed(2);
+                
+                // 更新饼图数据
+                state.ipTotals = data.flows.map(flow => ({
+                    ip: flow.direction === 'RX' ? flow.src_ip : flow.dst_ip,
+                    rx: flow.direction === 'RX' ? flow.total_bytes : 0,
+                    tx: flow.direction === 'TX' ? flow.total_bytes : 0
+                }));
+                
+                pieChart.data.labels = state.ipTotals.map(ip => ip.ip);
+                pieChart.data.datasets = [{
+                    data: state.ipTotals.map(ip => ip.rx + ip.tx),
+                    backgroundColor: [
+                        '#ff5252', '#69f0ae', '#ffeb3b', '#4fc3f7', 
+                        '#ba68c8', '#ff8a65', '#a1887f'
+                    ],
+                    borderColor: '#1e1e1e',
+                    borderWidth: 2
+                }];
+                pieChart.update();
+                
+                // 更新柱状图数据
+                state.history.shift();
+                state.history.push({
+                    time: '当前',
+                    rx: data.total_rx_bytes - (state.history[8]?.rx || 0),
+                    tx: data.total_tx_bytes - (state.history[8]?.tx || 0)
+                });
+                
+                barChart.data.labels = state.history.map((_, i) => i === 9 ? '当前' : `${9-i}s前`);
+                barChart.data.datasets = [
+                    {
+                        label: '接收流量',
+                        data: state.history.map(item => item.rx),
+                        backgroundColor: 'rgba(105, 240, 174, 0.7)',
+                        borderColor: 'rgba(105, 240, 174, 1)',
+                        borderWidth: 1
+                    },
+                    {
+                        label: '发送流量',
+                        data: state.history.map(item => item.tx),
+                        backgroundColor: 'rgba(255, 82, 82, 0.7)',
+                        borderColor: 'rgba(255, 82, 82, 1)',
+                        borderWidth: 1
+                    }
+                ];
+                barChart.update();
+                
+                // 更新流量明细
+                const flowBody = document.getElementById('flowBody');
+                flowBody.innerHTML = data.flows.map(flow => `
+                    <tr class="highlight">
+                        <td>${new Date().toLocaleTimeString()}</td>
+                        <td class="${flow.direction.toLowerCase()}">${flow.direction}</td>
+                        <td class="${flow.src_ip.includes(':') ? 'ipv6' : ''}">${flow.src_ip}</td>
+                        <td class="${flow.dst_ip.includes(':') ? 'ipv6' : ''}">${flow.dst_ip}</td>
+                        <td>${flow.total_bytes.toLocaleString()}</td>
+                        <td>${flow.total_packets.toLocaleString()}</td>
+                        <td>${flow.peak_bytes.toLocaleString()}</td>
+                    </tr>
+                `).join('');
+                
+            } catch (error) {
+                console.error('获取数据失败:', error);
+            }
+        }
+
+        // 每2秒更新一次
+        setInterval(fetchStats, 2000);
+        window.onload = fetchStats;
+    </script>
+</body>
+</html>
